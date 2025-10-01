@@ -1,5 +1,5 @@
 import { Actor } from 'apify';
-import { CheerioCrawler, log } from 'crawlee';
+import { CheerioCrawler, log, sleep } from 'crawlee';
 
 // ---------- Anti-bot pools ----------
 const USER_AGENTS = [
@@ -36,7 +36,7 @@ const proxy = await Actor.createProxyConfiguration(proxyConfiguration);
 
 let pushedCount = 0;
 
-// ---------- Utility functions (meta extraction & description cleaning) ----------
+// ---------- Helpers ----------
 function findMetaList($) {
     const $h1 = $('h1').first();
     const $main = $h1.length ? $h1.closest('main') : $('main').first();
@@ -105,7 +105,7 @@ function cleanDescription($) {
 function detectBlocking(response, session, url) {
     const status = response?.statusCode;
     if (status === 403 || status === 429) {
-        log.warning(`Blocked with status ${status} on ${url}`);
+        log.warning(`⚠️ Blocked with status ${status} on ${url}`);
         if (session) session.markBad();
         const err = new Error(`Request blocked - ${status}`);
         err.statusCode = status;
@@ -121,7 +121,7 @@ const crawler = new CheerioCrawler({
     maxRequestRetries: 5,
 
     preNavigationHooks: [
-        async ({ request }) => {
+        async ({ request, session }) => {
             const ua = randFrom(USER_AGENTS);
             const secChUa = randFrom(SEC_CH_UA_POOL);
             const acceptLang = randFrom(ACCEPT_LANG_POOL);
@@ -140,13 +140,23 @@ const crawler = new CheerioCrawler({
 
             request.headers = { ...(request.headers || {}), ...headers };
 
-            // add random delay to look human
-            await Actor.sleep(jitter(500, 2000));
+            // 🔎 Debug logs
+            log.debug(`🟢 Preparing request: ${request.url}`);
+            log.debug(`   Session: ${session?.id || 'N/A'}`);
+            log.debug(`   UA: ${ua}`);
+            log.debug(`   Cookie: ${headers.Cookie ? headers.Cookie.slice(0, 80) + '...' : 'None'}`);
+
+            // random delay
+            const delay = jitter(500, 2000);
+            log.debug(`   Sleeping for ${delay} ms before request`);
+            await sleep(delay);
         },
     ],
 
     async requestHandler({ request, $, response, session, enqueueLinks }) {
         detectBlocking(response, session, request.loadedUrl);
+
+        log.info(`📄 Processing ${request.userData.label} page: ${request.loadedUrl}`);
 
         if (request.userData.label === 'LIST') {
             await enqueueLinks({ selector: 'a[href*="/publicjobs/"]', label: 'DETAIL' });
@@ -154,6 +164,7 @@ const crawler = new CheerioCrawler({
             const next = $('a[rel="next"]').attr('href');
             if (next) {
                 const abs = new URL(next, request.loadedUrl).href;
+                log.debug(`   Found next page: ${abs}`);
                 await enqueueLinks({ urls: [abs], label: 'LIST' });
             }
             return;
@@ -187,13 +198,15 @@ const crawler = new CheerioCrawler({
             job.description_html = desc.html;
             job.description_text = desc.text;
 
+            log.debug(`   Extracted job: ${JSON.stringify(job, null, 2).slice(0, 400)}...`);
+
             await Actor.pushData(job);
             pushedCount++;
         }
     },
 
     failedRequestHandler({ request, error }) {
-        log.error(`Request ${request.url} failed. Error: ${error.message}`);
+        log.error(`❌ Request ${request.url} failed. Error: ${error.message}`);
     },
 });
 
