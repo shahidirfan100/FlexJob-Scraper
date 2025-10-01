@@ -1,81 +1,84 @@
 {
   "title": "FlexJobs Jobs Scraper",
-  "description": "Scrape jobs from FlexJobs using keywords and location. Supports advanced features like cookie injection and pagination control.",
+  "description": "Scrapes job listings from FlexJobs by crawling public category and job pages. Does not require a login and avoids using the keyword search, which is restricted for anonymous users.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "description": "List of FlexJobs category or listing URLs to start crawling from. The actor will find more links from these pages.",
+      "prefill": [
+        "https://www.flexjobs.com/remote-jobs",
+        "https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now"
+      ],
+      "editor": "stringList",
+      "sectionCaption": "Start URLs"
+    },
     "keyword": {
       "title": "Keyword(s)",
       "type": "string",
-      "description": "The job title, skill, or keyword to search for (e.g., 'software developer').",
+      "description": "NOTE: This field is for compatibility and is NOT used to perform a search, as FlexJobs search is restricted. The scraper starts from broad category pages.",
       "editor": "textfield",
-      "sectionCaption": "Search Parameters"
+      "sectionCaption": "Search Parameters (Not Used)"
     },
     "location": {
       "title": "Location",
       "type": "string",
-      "description": "Optional location filter to narrow down the job search.",
+      "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
       "editor": "textfield"
     },
     "posted_date": {
       "title": "Date Posted",
       "type": "string",
-      "description": "Filter jobs by the date they were posted.",
+      "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
       "editor": "select",
-      "prefill": "anytime",
-      "options": {
-        "items": [
-          { "value": "anytime", "label": "Any Time" },
-          { "value": "24h", "label": "Last 24 Hours" },
-          { "value": "7d", "label": "Last 7 Days" },
-          { "value": "30d", "label": "Last 30 Days" }
-        ]
-      }
+      "default": "anytime",
+      "enum": [
+        "anytime",
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "enumTitles": [
+        "Any Time",
+        "Last 24 Hours",
+        "Last 7 Days",
+        "Last 30 Days"
+      ]
     },
-    "collectDetails": {
-      "title": "Collect Full Job Details",
-      "type": "boolean",
-      "description": "If enabled, the scraper will visit each job's detail page to extract the full description. If disabled, it only collects data from the list page (faster).",
-      "editor": "checkbox",
-      "default": true,
-      "sectionCaption": "Data Collection"
-    },
-    "maxJobs": {
+    "results_wanted": {
       "title": "Maximum Jobs",
       "type": "integer",
       "description": "The maximum number of jobs to collect. The scraper will stop when this limit is reached.",
       "minimum": 1,
       "editor": "number",
-      "default": 50
+      "default": 100,
+      "sectionCaption": "Data Collection"
     },
-    "maxPages": {
-      "title": "Maximum Pages",
+    "maxPagesPerList": {
+      "title": "Maximum Pages per List",
       "type": "integer",
-      "description": "A safety cap on the number of search result pages to visit. The scraper stops if it hits this limit, even if 'Maximum Jobs' has not been reached.",
+      "description": "A safety cap on the number of search result pages to visit per category. The scraper stops paginating a category if it hits this limit.",
       "minimum": 1,
-      "editor": "number"
+      "editor": "number",
+      "default": 25
     },
-    "cookies": {
-      "title": "Custom Cookies (Raw Header)",
-      "type": "string",
-      "description": "Optional raw Cookie header string to send with requests. Useful for bypassing consent modals or authentication.",
-      "editor": "textfield",
+    "maxConcurrency": {
+      "title": "Max Concurrency",
+      "type": "integer",
+      "description": "Maximum number of concurrent requests.",
+      "minimum": 1,
+      "default": 10,
       "sectionCaption": "Advanced Configuration"
-    },
-    "cookiesJson": {
-      "title": "Custom Cookies (JSON)",
-      "type": "string",
-      "description": "Optional JSON for cookies. Accepts an array of strings or a name-value map. Merged with the raw header.",
-      "editor": "textarea"
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Use Apify Proxy (recommended). Consider Residential proxies if you encounter blocking.",
+      "description": "Use Apify Proxy (recommended). Consider Residential proxies if you encounter blocking. A proxy is required to avoid being blocked.",
       "editor": "proxy"
     }
   },
-  "required": [
-    "keyword"
-  ]
+  "required": [],
+  "additionalProperties": false
 }
