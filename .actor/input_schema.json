@@ -1,0 +1,81 @@
+{
+  "title": "FlexJobs Jobs Scraper",
+  "description": "Scrape jobs from FlexJobs using keywords and location. Supports advanced features like cookie injection and pagination control.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "keyword": {
+      "title": "Keyword(s)",
+      "type": "string",
+      "description": "The job title, skill, or keyword to search for (e.g., 'software developer').",
+      "editor": "textfield",
+      "sectionCaption": "Search Parameters"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Optional location filter to narrow down the job search.",
+      "editor": "textfield"
+    },
+    "posted_date": {
+      "title": "Date Posted",
+      "type": "string",
+      "description": "Filter jobs by the date they were posted.",
+      "editor": "select",
+      "prefill": "anytime",
+      "options": {
+        "items": [
+          { "value": "anytime", "label": "Any Time" },
+          { "value": "24h", "label": "Last 24 Hours" },
+          { "value": "7d", "label": "Last 7 Days" },
+          { "value": "30d", "label": "Last 30 Days" }
+        ]
+      }
+    },
+    "collectDetails": {
+      "title": "Collect Full Job Details",
+      "type": "boolean",
+      "description": "If enabled, the scraper will visit each job's detail page to extract the full description. If disabled, it only collects data from the list page (faster).",
+      "editor": "checkbox",
+      "default": true,
+      "sectionCaption": "Data Collection"
+    },
+    "maxJobs": {
+      "title": "Maximum Jobs",
+      "type": "integer",
+      "description": "The maximum number of jobs to collect. The scraper will stop when this limit is reached.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 50
+    },
+    "maxPages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "A safety cap on the number of search result pages to visit. The scraper stops if it hits this limit, even if 'Maximum Jobs' has not been reached.",
+      "minimum": 1,
+      "editor": "number"
+    },
+    "cookies": {
+      "title": "Custom Cookies (Raw Header)",
+      "type": "string",
+      "description": "Optional raw Cookie header string to send with requests. Useful for bypassing consent modals or authentication.",
+      "editor": "textfield",
+      "sectionCaption": "Advanced Configuration"
+    },
+    "cookiesJson": {
+      "title": "Custom Cookies (JSON)",
+      "type": "string",
+      "description": "Optional JSON for cookies. Accepts an array of strings or a name-value map. Merged with the raw header.",
+      "editor": "textarea"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Use Apify Proxy (recommended). Consider Residential proxies if you encounter blocking.",
+      "editor": "proxy"
+    }
+  },
+  "required": [
+    "keyword"
+  ]
+}
