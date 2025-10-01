@@ -17,48 +17,59 @@ const {
 
 const proxy = await Actor.createProxyConfiguration(proxyConfiguration);
 
-function readLabeledValue($, label) {
-    const el = $(`li:contains("${label}") p, li:has(h5:contains("${label}")) p`).first();
-    if (el && el.length) {
-        return el.text().trim().replace(/\s+/g, ' ');
+// --- Helpers ---
+
+function getField($, label, idAttr) {
+    // Priority: ID attribute
+    if (idAttr) {
+        const el = $(`li#${idAttr} p`).first();
+        if (el.length) return el.text().trim().replace(/\s+/g, ' ');
     }
+    // Fallback: label text
+    const el = $(`li:has(h5:contains("${label}")) p`).first();
+    if (el.length) return el.text().trim().replace(/\s+/g, ' ');
     return null;
 }
 
-// Clean description HTML and text
-function cleanDescription($, containerSel) {
-    const $container = $(containerSel).first().clone();
+function cleanDescription($) {
+    // Target main job body
+    let $desc = $('main .sc-1d24dx7-2, main section, main article').first().clone();
 
-    if (!$container.length) {
-        return { html: null, text: null };
-    }
+    if (!$desc.length) return { html: null, text: null };
 
-    // Remove unwanted sections: links, nav, signup prompts, scripts, ads
-    $container.find('a, nav, ul.page-breadcrumb, .unlock-lock, .similar-jobs, script, style').remove();
+    // Remove unwanted UI blocks
+    $desc.find('a, nav, ul.page-breadcrumb, .unlock-lock, .similar-jobs, script, style, button, svg, img').remove();
 
     // Strip attributes
-    $container.find('*').each((_, el) => {
+    $desc.find('*').each((_, el) => {
         el.attribs = {};
     });
 
-    // Only allow useful tags
-    $container.find('*').each((_, el) => {
+    // Keep only safe tags
+    $desc.find('*').each((_, el) => {
         const tag = el.tagName.toLowerCase();
         if (!['p', 'ul', 'li', 'br', 'strong', 'em'].includes(tag)) {
             $(el).replaceWith($(el).html() || '');
         }
     });
 
-    let html = $container.html() ? $container.html().trim() : null;
-    let text = $container.text().trim();
+    // Remove empty tags
+    $desc.find('*').each((_, el) => {
+        if (!$(el).text().trim()) $(el).remove();
+    });
 
-    // Regex cleanup for FlexJobs marketing text
-    const cleanupRegex = /(Unlock this job[\s\S]*?jobs)|Find Your Next Remote Job!?|Only hand-screened, legit jobs|No ads, scams, or junk|Expert resources, webinars & events/gi;
+    let html = $desc.html() ? $desc.html().trim() : null;
+    let text = $desc.text().trim();
+
+    // Regex cleanup for FlexJobs marketing & stray div/button endings
+    const cleanupRegex = /(Unlock this job[\s\S]*?jobs)|Find Your Next Remote Job!?|Only hand-screened, legit jobs|No ads, scams, or junk|Expert resources, webinars & events|<\/?div>|<\/?button>|<\/?i>/gi;
     if (html) html = html.replace(cleanupRegex, '');
     if (text) text = text.replace(cleanupRegex, '');
 
     return { html, text };
 }
+
+// --- Crawler ---
 
 let pushedCount = 0;
 
@@ -69,9 +80,8 @@ const crawler = new CheerioCrawler({
     maxRequestRetries: 5,
     requestHandlerTimeoutSecs: 60,
 
-    // Inject cookies if provided
     preNavigationHooks: [
-        async ({ request }, gotoOptions) => {
+        async ({}, gotoOptions) => {
             if (cookies && cookies.length) {
                 const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
                 gotoOptions.headers = {
@@ -102,7 +112,6 @@ const crawler = new CheerioCrawler({
             if (nextUrl) {
                 await enqueueLinks({ urls: [new URL(nextUrl, request.loadedUrl).href], label: 'LIST' });
             } else {
-                // fallback synthetic ?page=
                 const m = request.loadedUrl.match(/page=(\d+)/);
                 let page = m ? parseInt(m[1], 10) : 1;
                 if (page < maxPagesPerList) {
@@ -125,15 +134,15 @@ const crawler = new CheerioCrawler({
                 source: 'flexjobs',
                 url: request.loadedUrl,
                 title,
-                remote_level: readLabeledValue($, 'Remote Level'),
-                location: readLabeledValue($, 'Location'),
-                salary: readLabeledValue($, 'Salary'),
-                benefits: readLabeledValue($, 'Benefits'),
-                job_type: readLabeledValue($, 'Job Type'),
-                schedule: readLabeledValue($, 'Job Schedule'),
-                career_level: readLabeledValue($, 'Career Level'),
+                remote_level: getField($, 'Remote Level', 'remote-work-level'),
+                location: getField($, 'Location', 'location'),
+                salary: getField($, 'Salary', 'salary'),
+                benefits: getField($, 'Benefits', 'benefits'),
+                job_type: getField($, 'Job Type', 'job-type'),
+                schedule: getField($, 'Job Schedule', 'job-schedule'),
+                career_level: getField($, 'Career Level', 'career-level'),
                 company: (() => {
-                    const val = readLabeledValue($, 'Company');
+                    const val = getField($, 'Company', 'company');
                     if (!val || /details here/i.test(val)) return null;
                     return val;
                 })(),
@@ -141,7 +150,7 @@ const crawler = new CheerioCrawler({
             };
 
             // Description cleaning
-            const desc = cleanDescription($, 'main, article, section');
+            const desc = cleanDescription($);
             job.description_html = desc.html;
             job.description_text = desc.text;
 
