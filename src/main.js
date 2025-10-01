@@ -1,224 +1,129 @@
-import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
-
-/**
- * FlexJobs scraper using HTTP + Cheerio (no headless browser).
- * Keeps the original stacks (Apify + Crawlee + Cheerio) and adds:
- * - Proxy support & session rotation
- * - Anti-blocking with realistic headers (handled by got-scraping internally)
- * - Robust selectors for FlexJobs list and detail pages
- * - Conservative pagination discovery
- * - Result cap via `results_wanted`
- *
- * Input (kept for backward compatibility, though FlexJobs does not expose open search params):
- * {
- *   "results_wanted": 100,
- *   "maxPagesPerList": 25,
- *   "maxConcurrency": 10,
- *   "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] }
- * }
- */
+import { Actor } from 'apify';
+import { CheerioCrawler, log } from 'crawlee';
 
 await Actor.init();
 
-const input = await Actor.getInput() || {};
 const {
-    // Kept for compatibility; FlexJobs search does not accept these openly for anonymous users
-    keyword,
-    location,
-    posted_date = 'anytime',
-
-    // Actively used:
     results_wanted = 100,
-    maxPagesPerList = 25,
+    maxPagesPerList = 20,
     maxConcurrency = 10,
     proxyConfiguration,
-} = input;
+    startUrls = [
+        'https://www.flexjobs.com/remote-jobs',
+        'https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now'
+    ],
+    cookies = []
+} = await Actor.getInput() || {};
 
-const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
+const proxy = await Actor.createProxyConfiguration(proxyConfiguration);
 
-let jobCount = 0;
-
-// Deduplicate by job URL
-const seen = new Set();
-
-// A couple of public "seed" pages to crawl and discover jobs/category pages.
-// We intentionally do NOT construct a search URL from input fields because FlexJobs gates most query functionality.
-const seeds = [
-    'https://www.flexjobs.com/remote-jobs', // categories hub
-    'https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now', // "New Jobs"
-];
-
-// Utility: normalize to absolute URL
-const abs = (href) => {
-    if (!href) return null;
-    if (href.startsWith('http')) return href;
-    if (href.startsWith('/')) return `https://www.flexjobs.com${href}`;
-    return `https://www.flexjobs.com/${href.replace(/^\/+/, '')}`;
-};
-
-// Extract label/value pairs on the job detail page where data is presented as:
-// <h1>Title</h1>
-// <h5>Remote Level:</h5><div>...</div>
-// <h5>Location:</h5><div>...</div>
-// (...)
-// Structure may differ for some ads, so we try multiple patterns.
-const readLabeledValue = ($, label) => {
-    // Try by header tag
-    let el = $(`h5:contains("${label}")`).first();
-    if (el.length) {
-        // Prefer next sibling's text (common on FlexJobs)
-        const nextText = el.next().text().trim();
-        if (nextText) return nextText;
-        // Or text within the same parent after label
-        const parent = el.parent();
-        if (parent.length) {
-            const text = parent.text().replace(new RegExp(`${label}\\s*:?\\s*`, 'i'), '').trim();
-            if (text) return text;
-        }
+function readLabeledValue($, label) {
+    const el = $(`li:contains("${label}") p, li:has(h5:contains("${label}")) p`).first();
+    if (el && el.length) {
+        return el.text().trim().replace(/\s+/g, ' ');
     }
-
-    // Try definition list dt/dd
-    el = $(`dt:contains("${label}")`).first();
-    if (el.length) {
-        const dd = el.next('dd').text().trim();
-        if (dd) return dd;
-    }
-
-    // Try bold label + following text
-    el = $(`strong:contains("${label}")`).first();
-    if (el.length) {
-        const tail = el.parent().text().replace(new RegExp(`${label}\\s*:?\\s*`, 'i'), '').trim();
-        if (tail) return tail;
-    }
-
     return null;
-};
+}
 
-// Crawler
+// Clean description HTML and text
+function cleanDescription($, containerSel) {
+    const $container = $(containerSel).first().clone();
+
+    if (!$container.length) {
+        return { html: null, text: null };
+    }
+
+    // Remove unwanted sections: links, nav, signup prompts, scripts, ads
+    $container.find('a, nav, ul.page-breadcrumb, .unlock-lock, .similar-jobs, script, style').remove();
+
+    // Strip attributes
+    $container.find('*').each((_, el) => {
+        el.attribs = {};
+    });
+
+    // Only allow useful tags
+    $container.find('*').each((_, el) => {
+        const tag = el.tagName.toLowerCase();
+        if (!['p', 'ul', 'li', 'br', 'strong', 'em'].includes(tag)) {
+            $(el).replaceWith($(el).html() || '');
+        }
+    });
+
+    let html = $container.html() ? $container.html().trim() : null;
+    let text = $container.text().trim();
+
+    // Regex cleanup for FlexJobs marketing text
+    const cleanupRegex = /(Unlock this job[\s\S]*?jobs)|Find Your Next Remote Job!?|Only hand-screened, legit jobs|No ads, scams, or junk|Expert resources, webinars & events/gi;
+    if (html) html = html.replace(cleanupRegex, '');
+    if (text) text = text.replace(cleanupRegex, '');
+
+    return { html, text };
+}
+
+let pushedCount = 0;
+
 const crawler = new CheerioCrawler({
-    proxyConfiguration: proxyConfig,
-    useSessionPool: true,
-    persistCookiesPerSession: false,
-    maxRequestRetries: 3,
+    proxyConfiguration: proxy,
     maxConcurrency,
-    // Avoid overwhelming the site
-    maxRequestsPerMinute: 120,
-    // Moderate timeout for cheap pages
+    useSessionPool: true,
+    maxRequestRetries: 5,
     requestHandlerTimeoutSecs: 60,
-    // CheerioCrawler uses got-scraping under the hood with HeaderGenerator, which rotates realistic headers.
-    requestHandler: async (ctx) => {
-        const { request, $, enqueueLinks, log } = ctx;
-        const { userData } = request;
-        const label = userData.label || 'ROOT';
 
-        if (label === 'ROOT') {
-            // From hub pages, collect category/listing pages and direct public job detail links.
-            // Category/list page URLs look like /remote-jobs/<slug> or deeper like /remote-jobs/<category>/<sub>
-            const listLinks = new Set();
+    // Inject cookies if provided
+    preNavigationHooks: [
+        async ({ request }, gotoOptions) => {
+            if (cookies && cookies.length) {
+                const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+                gotoOptions.headers = {
+                    ...(gotoOptions.headers || {}),
+                    Cookie: cookieHeader,
+                };
+            }
+        }
+    ],
 
-            $('a[href]').each((_, a) => {
-                const href = $(a).attr('href');
-                if (!href) return;
-
-                // Collect public job detail pages
-                if (/^\/publicjobs\//.test(href) || /https?:\/\/www\.flexjobs\.com\/publicjobs\//.test(href)) {
-                    listLinks.add(abs(href));
-                    return;
-                }
-
-                // Collect category/list pages
-                if (/^\/remote-jobs(\/|$)/.test(href) || /https?:\/\/www\.flexjobs\.com\/remote-jobs/.test(href)) {
-                    // Avoid login/signup links, and over-broad hubs we already have
-                    const url = abs(href);
-                    if (!/\/(how|works|blog|articles|events|webinars|career|advice|press|app|research)/i.test(url)) {
-                        listLinks.add(url);
-                    }
-                }
+    async requestHandler({ request, $, enqueueLinks }) {
+        if (request.userData.label === 'LIST') {
+            // Enqueue job detail pages
+            await enqueueLinks({
+                selector: 'a[href*="/publicjobs/"]',
+                label: 'DETAIL',
+                transformRequestFunction: req => {
+                    req.userData.label = 'DETAIL';
+                    return req;
+                },
             });
 
-            const toAdd = [];
-            for (const url of listLinks) {
-                // Push category/list as LIST; publicjobs as DETAIL
-                if (/\/publicjobs\//i.test(url)) {
-                    toAdd.push({ url, userData: { label: 'DETAIL' } });
-                } else {
-                    toAdd.push({ url, userData: { label: 'LIST', page: 1 } });
+            // Pagination
+            let nextUrl = $('a[rel="next"]').attr('href')
+                || $('a:contains("Next")').attr('href')
+                || $('a:contains("Older")').attr('href');
+
+            if (nextUrl) {
+                await enqueueLinks({ urls: [new URL(nextUrl, request.loadedUrl).href], label: 'LIST' });
+            } else {
+                // fallback synthetic ?page=
+                const m = request.loadedUrl.match(/page=(\d+)/);
+                let page = m ? parseInt(m[1], 10) : 1;
+                if (page < maxPagesPerList) {
+                    const sep = request.loadedUrl.includes('?') ? '&' : '?';
+                    const nextSynthetic = request.loadedUrl.replace(/([?&])page=\d+/, `$1page=${page + 1}`);
+                    const finalUrl = nextSynthetic === request.loadedUrl
+                        ? `${request.loadedUrl}${sep}page=${page + 1}`
+                        : nextSynthetic;
+                    await enqueueLinks({ urls: [finalUrl], label: 'LIST' });
                 }
             }
-
-            if (toAdd.length) await ctx.addRequests(toAdd);
-            return;
         }
 
-        if (label === 'LIST') {
-            // Extract public job links from any listing-like page.
-            const jobLinks = new Set();
-            $('a[href]').each((_, a) => {
-                const href = $(a).attr('href');
-                if (!href) return;
-                if (/^\/publicjobs\//.test(href) || /https?:\/\/www\.flexjobs\.com\/publicjobs\//.test(href)) {
-                    jobLinks.add(abs(href));
-                }
-            });
+        else if (request.userData.label === 'DETAIL') {
+            if (pushedCount >= results_wanted) return;
 
-            const detailRequests = [];
-            for (const url of jobLinks) {
-                if (jobCount >= results_wanted) break;
-                if (seen.has(url)) continue;
-                seen.add(url);
-                detailRequests.push({ url, userData: { label: 'DETAIL' } });
-            }
+            const title = $('h1').first().text().trim();
 
-            if (detailRequests.length) await ctx.addRequests(detailRequests);
-
-            // Respect results cap early
-            if (jobCount >= results_wanted) return;
-
-            // Discover "Next" pages (if present).
-            // We try common patterns first.
-            let nextHref = $('a[rel="next"]').attr('href') ||
-                           $('a:contains("Next")').attr('href') ||
-                           $('a:contains("Older")').attr('href') ||
-                           $('a:contains("More")').attr('href') ||
-                           $('a[href*="page="]').attr('href');
-
-            // Fallback: synthetically construct ?page=N if we can
-            let currentUrl = request.url;
-            const currentPage = Number(userData.page || 1);
-
-            if (!nextHref && currentPage < maxPagesPerList) {
-                const urlObj = new URL(currentUrl);
-                const nextPageNum = currentPage + 1;
-
-                if (!urlObj.searchParams.has('page')) {
-                    urlObj.searchParams.set('page', String(nextPageNum));
-                } else {
-                    urlObj.searchParams.set('page', String(nextPageNum));
-                }
-
-                nextHref = urlObj.toString();
-            }
-
-            if (nextHref && currentPage < maxPagesPerList) {
-                await ctx.addRequests([{
-                    url: abs(nextHref),
-                    userData: { label: 'LIST', page: currentPage + 1 },
-                }]);
-            }
-
-            return;
-        }
-
-        if (label === 'DETAIL') {
-            if (jobCount >= results_wanted) return;
-
-            const url = request.url;
-            const title = ($('h1').first().text() || '').trim();
-
-            const record = {
+            const job = {
                 source: 'flexjobs',
-                url,
+                url: request.loadedUrl,
                 title,
                 remote_level: readLabeledValue($, 'Remote Level'),
                 location: readLabeledValue($, 'Location'),
@@ -227,46 +132,29 @@ const crawler = new CheerioCrawler({
                 job_type: readLabeledValue($, 'Job Type'),
                 schedule: readLabeledValue($, 'Job Schedule'),
                 career_level: readLabeledValue($, 'Career Level'),
-                company: readLabeledValue($, 'Company'),
-                // Description content on public pages is limited; capture visible text blocks as fallback
-                // and keep raw HTML for consumers that want to parse further.
-                description_html: (() => {
-                    // Try to find a primary content container near the title
-                    const main = $('main, article, #content, .content').first();
-                    if (main.length) return main.html();
-                    // Fallback to body
-                    return $('body').html();
-                })(),
-                description_text: (() => {
-                    const main = $('main, article, #content, .content').first();
-                    const text = (main.length ? main.text() : $('body').text()) || '';
-                    return text.replace(/\s+/g, ' ').trim();
+                company: (() => {
+                    const val = readLabeledValue($, 'Company');
+                    if (!val || /details here/i.test(val)) return null;
+                    return val;
                 })(),
                 scraped_at: new Date().toISOString(),
             };
 
-            await Dataset.pushData(record);
-            jobCount += 1;
+            // Description cleaning
+            const desc = cleanDescription($, 'main, article, section');
+            job.description_html = desc.html;
+            job.description_text = desc.text;
 
-            // Respect results cap
-            if (jobCount >= results_wanted) {
-                log.info(`Reached results_wanted=${results_wanted}, stopping soon.`);
-            }
-
-            return;
+            await Actor.pushData(job);
+            pushedCount++;
         }
+    },
+
+    failedRequestHandler({ request }) {
+        log.error(`Request ${request.url} failed too many times`);
     },
 });
 
-// Seed the crawl
-const startRequests = seeds.map((url) => ({ url, userData: { label: 'ROOT' } }));
-
-log.info('Starting FlexJobs scrape with CheerioCrawler...');
-log.info(`Seeds: ${seeds.join(', ')}`);
-log.info(`Results wanted: ${results_wanted}`);
-
-await crawler.run(startRequests);
-
-log.info(`Scraping finished. Scraped ${jobCount} jobs.`);
+await crawler.run(startUrls.map(url => ({ url, userData: { label: 'LIST' } })));
 
 await Actor.exit();

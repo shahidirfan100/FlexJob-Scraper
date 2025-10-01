@@ -1,84 +1,93 @@
-{
-  "title": "FlexJobs Jobs Scraper",
-  "description": "Scrapes job listings from FlexJobs by crawling public category and job pages. Does not require a login and avoids using the keyword search, which is restricted for anonymous users.",
-  "type": "object",
-  "schemaVersion": 1,
-  "properties": {
-    "startUrls": {
-      "title": "Start URLs",
-      "type": "array",
-      "description": "List of FlexJobs category or listing URLs to start crawling from. The actor will find more links from these pages.",
-      "prefill": [
-        "https://www.flexjobs.com/remote-jobs",
-        "https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now"
-      ],
-      "editor": "stringList",
-      "sectionCaption": "Start URLs"
+[
+  {
+    "title": "FlexJobs Jobs Scraper",
+    "description": "Scrapes job listings from FlexJobs by crawling public category and job pages. Does not require a login and avoids using the keyword search, which is restricted for anonymous users.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+      "startUrls": {
+        "title": "Start URLs",
+        "type": "array",
+        "description": "List of FlexJobs category or listing URLs to start crawling from. The actor will find more links from these pages.",
+        "prefill": [
+          "https://www.flexjobs.com/remote-jobs",
+          "https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now"
+        ],
+        "editor": "stringList",
+        "sectionCaption": "Start URLs"
+      },
+      "keyword": {
+        "title": "Keyword(s)",
+        "type": "string",
+        "description": "NOTE: This field is for compatibility and is NOT used to perform a search, as FlexJobs search is restricted. The scraper starts from broad category pages.",
+        "editor": "textfield",
+        "sectionCaption": "Search Parameters (Not Used)"
+      },
+      "location": {
+        "title": "Location",
+        "type": "string",
+        "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
+        "editor": "textfield"
+      },
+      "posted_date": {
+        "title": "Date Posted",
+        "type": "string",
+        "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
+        "editor": "select",
+        "default": "anytime",
+        "enum": [
+          "anytime",
+          "24h",
+          "7d",
+          "30d"
+        ],
+        "enumTitles": [
+          "Any Time",
+          "Last 24 Hours",
+          "Last 7 Days",
+          "Last 30 Days"
+        ]
+      },
+      "results_wanted": {
+        "title": "Maximum Jobs",
+        "type": "integer",
+        "description": "The maximum number of jobs to collect. The scraper will stop when this limit is reached.",
+        "minimum": 1,
+        "editor": "number",
+        "default": 100,
+        "sectionCaption": "Data Collection"
+      },
+      "maxPagesPerList": {
+        "title": "Maximum Pages per List",
+        "type": "integer",
+        "description": "A safety cap on the number of search result pages to visit per category. The scraper stops paginating a category if it hits this limit.",
+        "minimum": 1,
+        "editor": "number",
+        "default": 25
+      },
+      "maxConcurrency": {
+        "title": "Max Concurrency",
+        "type": "integer",
+        "description": "Maximum number of concurrent requests.",
+        "minimum": 1,
+        "default": 10,
+        "sectionCaption": "Advanced Configuration"
+      },
+      "proxyConfiguration": {
+        "title": "Proxy Configuration",
+        "type": "object",
+        "description": "Use Apify Proxy (recommended). Consider Residential proxies if you encounter blocking. A proxy is required to avoid being blocked.",
+        "editor": "proxy"
+      },
+      "cookies": {
+        "title": "Cookies",
+        "type": "array",
+        "description": "Optional list of cookies to send with every request. Each cookie should be a JSON object with 'name' and 'value'. Example: [{\"name\": \"sessionid\", \"value\": \"abc123\"}].",
+        "editor": "json",
+        "sectionCaption": "Authentication (Optional)"
+      }
     },
-    "keyword": {
-      "title": "Keyword(s)",
-      "type": "string",
-      "description": "NOTE: This field is for compatibility and is NOT used to perform a search, as FlexJobs search is restricted. The scraper starts from broad category pages.",
-      "editor": "textfield",
-      "sectionCaption": "Search Parameters (Not Used)"
-    },
-    "location": {
-      "title": "Location",
-      "type": "string",
-      "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
-      "editor": "textfield"
-    },
-    "posted_date": {
-      "title": "Date Posted",
-      "type": "string",
-      "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
-      "editor": "select",
-      "default": "anytime",
-      "enum": [
-        "anytime",
-        "24h",
-        "7d",
-        "30d"
-      ],
-      "enumTitles": [
-        "Any Time",
-        "Last 24 Hours",
-        "Last 7 Days",
-        "Last 30 Days"
-      ]
-    },
-    "results_wanted": {
-      "title": "Maximum Jobs",
-      "type": "integer",
-      "description": "The maximum number of jobs to collect. The scraper will stop when this limit is reached.",
-      "minimum": 1,
-      "editor": "number",
-      "default": 100,
-      "sectionCaption": "Data Collection"
-    },
-    "maxPagesPerList": {
-      "title": "Maximum Pages per List",
-      "type": "integer",
-      "description": "A safety cap on the number of search result pages to visit per category. The scraper stops paginating a category if it hits this limit.",
-      "minimum": 1,
-      "editor": "number",
-      "default": 25
-    },
-    "maxConcurrency": {
-      "title": "Max Concurrency",
-      "type": "integer",
-      "description": "Maximum number of concurrent requests.",
-      "minimum": 1,
-      "default": 10,
-      "sectionCaption": "Advanced Configuration"
-    },
-    "proxyConfiguration": {
-      "title": "Proxy Configuration",
-      "type": "object",
-      "description": "Use Apify Proxy (recommended). Consider Residential proxies if you encounter blocking. A proxy is required to avoid being blocked.",
-      "editor": "proxy"
-    }
-  },
-  "required": [],
-  "additionalProperties": false
-}
+    "required": [],
+    "additionalProperties": false
+  }
+]
