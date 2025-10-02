@@ -67,8 +67,8 @@ function extractMetaMap($) {
         else if (rawLabel === 'location') map.location = value || null;
         else if (rawLabel === 'salary') map.salary = value || null;
         else if (rawLabel === 'benefits') map.benefits = value || null;
-        else if (rawLabel === 'job type') map.job_type = value || null;      // e.g., Employee, Contract, Freelance
-        else if (rawLabel === 'job schedule') map.schedule = value || null;  // e.g., Full-Time, Part-Time
+        else if (rawLabel === 'job type') map.job_type = value || null;
+        else if (rawLabel === 'job schedule') map.schedule = value || null;
         else if (rawLabel === 'career level') map.career_level = value || null;
         else if (rawLabel === 'company') map.company = value || null;
     });
@@ -76,7 +76,78 @@ function extractMetaMap($) {
     return map;
 }
 
-// --- JSON-LD helpers (NEW) ---
+function normalizeCleanText(value) {
+    if (value === undefined || value === null) return null;
+    const text = String(value).replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    return text;
+}
+
+function extractCompanyName($, meta, jp) {
+    const seen = new Set();
+    const add = (value) => {
+        const clean = normalizeCleanText(value);
+        if (!clean) return;
+        const lowered = clean.toLowerCase();
+        if (lowered.includes('flexjobs') && lowered.replace(/flexjobs/ig, '').length === 0) return;
+        if (/details here/i.test(clean)) return;
+        if (/similar jobs/i.test(clean)) return;
+        if (!seen.has(lowered)) seen.add(lowered);
+    };
+
+    add(meta.company);
+
+    const org = jp?.hiringOrganization;
+    if (Array.isArray(org)) {
+        for (const item of org) {
+            add(item?.name);
+            add(item?.legalName);
+        }
+    } else if (org) {
+        add(org.name);
+        add(org.legalName);
+        if (typeof org === 'string') add(org);
+        const identifier = org.identifier;
+        if (Array.isArray(identifier)) {
+            for (const ident of identifier) add(ident?.name);
+        } else if (identifier) add(identifier?.name);
+    }
+
+    const selectors = [
+        '.job-view__company-name',
+        '.job-view__company a',
+        '.job-company',
+        '.job-company a',
+        '.job-details__company',
+        '.job-details__meta li:contains("Company")',
+        '.job-overview__company',
+        '.job-header__company',
+        '.job-header__company a',
+        '.job-top__meta a[href*="company"]',
+        '.job-top__meta [data-company-name]',
+        'a[href*="/company-profile/"]',
+        'a[href*="/companies/"]',
+        '[data-testid="company-name"]',
+        '[data-test="company-name"]',
+        '[data-qa="company-name"]',
+        '[itemprop="hiringOrganization"] [itemprop="name"]',
+    ];
+
+    for (const selector of selectors) {
+        const $el = $(selector).first();
+        if (!$el.length) continue;
+        add($el.attr('data-company'));
+        add($el.attr('data-company-name'));
+        add($el.attr('title'));
+        add($el.text());
+        const nested = $el.find('strong, span, a').first();
+        if (nested.length) add(nested.text());
+    }
+
+    const candidates = Array.from(seen.values());
+    return candidates.length ? candidates[0] : null;
+}
+
 function parseJsonLd($) {
     const scripts = Array.from($('script[type="application/ld+json"]'));
     const docs = [];
@@ -87,12 +158,9 @@ function parseJsonLd($) {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) docs.push(...parsed);
             else docs.push(parsed);
-        } catch (_) {
-            // ignore invalid JSON-LD blocks
-        }
+        } catch (_) {}
     }
 
-    // Find first JobPosting in graph/array/object
     function extractJobPosting(obj) {
         if (!obj || typeof obj !== 'object') return null;
         const t = (obj['@type'] || obj.type || '').toString().toLowerCase();
@@ -113,7 +181,6 @@ function parseJsonLd($) {
 function normalizeEmploymentType(val) {
     if (!val) return null;
     if (Array.isArray(val)) val = val.join(', ');
-    // Common encodings to friendly labels
     return String(val)
         .replace(/FULL[_\s-]?TIME/ig, 'Full-Time')
         .replace(/PART[_\s-]?TIME/ig, 'Part-Time')
@@ -127,16 +194,7 @@ function normalizeEmploymentType(val) {
 function locationFromJsonLd(jobPosting) {
     try {
         if (!jobPosting) return null;
-
-        // Remote hint
-        if (jobPosting.jobLocationType && /telecommute/i.test(jobPosting.jobLocationType)) {
-            // leave as "Remote" if no address
-            // If country present, combine: "Remote, US"
-        }
-
         const jl = jobPosting.jobLocation;
-        if (!jl) return jobPosting.jobLocationType ? 'Remote' : null;
-
         const pickAddr = (locObj) => {
             const addr = locObj?.address || {};
             const parts = [
@@ -157,35 +215,37 @@ function locationFromJsonLd(jobPosting) {
             if (s) return s;
         }
 
-        // Fallback to jobLocationType only
-        if (jobPosting.jobLocationType) return /telecommute/i.test(jobPosting.jobLocationType) ? 'Remote' : null;
+        if (jobPosting.jobLocationType && /telecommute/i.test(jobPosting.jobLocationType)) return 'Remote';
         return null;
     } catch {
         return null;
     }
 }
 
-// Prefer JSON-LD description if present; clean it
+function isMeaningfulDescription(text) {
+    if (!text) return false;
+    const stripped = text.replace(/\s+/g, ' ').trim();
+    if (!stripped) return false;
+    if (/^similar jobs$/i.test(stripped)) return false;
+    if (stripped.length < 60) return false;
+    return true;
+}
+
 function cleanHtmlFragment(html) {
     if (!html) return { html: null, text: null };
     const cheerio = require('cheerio');
     const $$ = cheerio.load(String(html));
 
-    // Remove anchors completely
     $$('a, script, style, button, svg, img, form, nav, header, footer, aside').remove();
-
-    // Strip attributes
     $$('*').each((_, el) => { el.attribs = {}; });
 
-    // Allowlist
     $$('*').each((_, el) => {
         const tag = el.tagName?.toLowerCase();
-        if (!['p','ul','li','br','strong','em','h2','h3','h4'].includes(tag)) {
+        if (!['p','ul','ol','li','br','strong','em','h2','h3','h4','h5'].includes(tag)) {
             $$(el).replaceWith($$(el).html() || '');
         }
     });
 
-    // Remove empties
     $$('*').each((_, el) => {
         const $el = $$(el);
         if (!$el.text().trim() && !$el.find('br').length) $el.remove();
@@ -193,55 +253,85 @@ function cleanHtmlFragment(html) {
 
     let cleaned = $$.root().html()?.trim() || null;
     if (cleaned) {
-        cleaned = cleaned
-            .replace(/<\/?(div|span|button|i)[^>]*>/gi, '')
-            .replace(/&nbsp;/gi, ' ')
-            .trim();
+        cleaned = cleaned.replace(/<\/?(div|span|button|i)[^>]*>/gi, '').replace(/&nbsp;/gi, ' ').trim();
     }
 
     const text = cleaned ? cleaned.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : null;
     return { html: cleaned, text };
 }
 
-function cleanDescriptionFromDom($) {
-    const $h1 = $('h1').first();
-    const $main = $h1.length ? $h1.closest('main').clone() : $('main').first().clone();
-    if (!$main.length) return { html: null, text: null };
-
-    $main.find('ul.page-breadcrumb, .unlock-lock, .similar-jobs, script, style, nav, header, footer, aside').remove();
-
-    const $meta = findMetaList($);
-    let $descScope;
-    if ($meta && $meta.length) {
-        $descScope = $meta.parent().nextAll().clone();
-    }
-    if (!$descScope || !$descScope.length) $descScope = $main.clone();
-
-    $descScope.find('a, button, svg, img, form').remove();
-    $descScope.find('*').each((_, el) => { el.attribs = {}; });
-    $descScope.find('*').each((_, el) => {
-        const tag = el.tagName.toLowerCase();
-        if (!['p','ul','li','br','strong','em','h2','h3','h4'].includes(tag)) {
-            $(el).replaceWith($(el).html() || '');
-        }
+function cleanSection($section) {
+    if (!$section || !$section.length) return { html: null, text: null };
+    const $clone = $section.clone();
+    $clone.find('.unlock-lock, [class*="similar"], [id*="similar"], script, style, nav, header, footer, aside').remove();
+    $clone.find('h2:contains("Similar Jobs"), h3:contains("Similar Jobs"), h4:contains("Similar Jobs")').each((_, el) => {
+        const $el = $clone.find(el);
+        $el.nextUntil('h1,h2,h3,h4').remove();
+        $el.remove();
     });
+    const cleaned = cleanHtmlFragment($clone.html());
+    if (!cleaned) return { html: null, text: null };
 
-    $descScope.find('*').each((_, el) => {
-        const $el = $(el);
-        if (!$el.text().trim() && !$el.find('br').length) $el.remove();
-    });
-
-    let html = $descScope.html()?.trim() || null;
+    let { html, text } = cleaned;
     if (html) {
-        html = html
-            .replace(/<\/?(div|span|button|i)[^>]*>/gi, '')
-            .replace(/&nbsp;/gi, ' ')
-            .trim();
+        html = html.replace(/<h[2-5][^>]*>\s*Similar Jobs\s*<\/h[2-5]>/gi, '').trim() || null;
+    }
+    if (text) {
+        text = text.replace(/\bSimilar Jobs\b/gi, ' ').replace(/\s+/g, ' ').trim() || null;
     }
 
-    const text = html ? html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : null;
+    if (!isMeaningfulDescription(text)) return { html: null, text: null };
     return { html, text };
 }
+
+function extractDescription($, jp) {
+    if (jp?.description) {
+        const cheerio = require('cheerio');
+        const wrap = cheerio.load('<div>' + jp.description + '</div>');
+        const fromJsonLd = cleanSection(wrap('div'));
+        if (isMeaningfulDescription(fromJsonLd.text)) return fromJsonLd;
+    }
+
+    const selectors = [
+        '[data-testid="job-description"]',
+        '[data-test="job-description"]',
+        '[data-qa="job-description"]',
+        '.job-description',
+        '.job-description__body',
+        '.job-description__content',
+        '.job-view__description',
+        '.job-view__body',
+        '.job-details__description',
+        '.job-details__body',
+        '#job-description',
+        'article.job-description',
+    ];
+
+    for (const selector of selectors) {
+        const $el = $(selector).first();
+        const cleaned = cleanSection($el);
+        if (isMeaningfulDescription(cleaned.text)) return cleaned;
+    }
+
+    const heading = $('h2, h3, h4').filter((_, el) => /job description|about the role|what you will do|responsibilities|what you'll do/i.test($(el).text())).first();
+    if (heading.length) {
+        const $container = $('<div></div>');
+        let $next = heading.next();
+        while ($next.length && !$next.is('h1, h2, h3')) {
+            $container.append($next.clone());
+            $next = $next.next();
+        }
+        const cleaned = cleanSection($container);
+        if (isMeaningfulDescription(cleaned.text)) return cleaned;
+    }
+
+    const $main = $('main').first();
+    const cleaned = cleanSection($main);
+    if (isMeaningfulDescription(cleaned.text)) return cleaned;
+
+    return { html: null, text: null };
+}
+
 
 function detectBlocking(response, session, url) {
     const status = response?.statusCode;
@@ -280,16 +370,8 @@ const crawler = new CheerioCrawler({
             }
 
             request.headers = { ...(request.headers || {}), ...headers };
-
-            // 🔎 Debug logs
             log.debug(`🟢 Preparing request: ${request.url}`);
-            log.debug(`   Session: ${session?.id || 'N/A'}`);
-            log.debug(`   UA: ${ua}`);
-            log.debug(`   Cookie: ${headers.Cookie ? headers.Cookie.slice(0, 80) + '...' : 'None'}`);
-
-            // random delay
             const delay = jitter(500, 2000);
-            log.debug(`   Sleeping for ${delay} ms before request`);
             await sleep(delay);
         },
     ],
@@ -297,15 +379,12 @@ const crawler = new CheerioCrawler({
     async requestHandler({ request, $, response, session, enqueueLinks }) {
         detectBlocking(response, session, request.loadedUrl);
 
-        log.info(`📄 Processing ${request.userData.label || 'UNKNOWN'} page: ${request.loadedUrl}`);
-
         if (request.userData.label === 'LIST') {
             await enqueueLinks({ selector: 'a[href*="/publicjobs/"]', label: 'DETAIL' });
 
             const next = $('a[rel="next"]').attr('href');
             if (next) {
                 const abs = new URL(next, request.loadedUrl).href;
-                log.debug(`   Found next page: ${abs}`);
                 await enqueueLinks({ urls: [abs], label: 'LIST' });
             }
             return;
@@ -315,60 +394,24 @@ const crawler = new CheerioCrawler({
             if (pushedCount >= results_wanted) return;
 
             const title = $('h1').first().text().trim() || null;
-
-            // 1) On-page metadata (authoritative for job_type vs schedule)
             const meta = extractMetaMap($);
-
-            // 2) JSON-LD fallback (NEW): for company, schedule, location, description
             const jp = parseJsonLd($);
-            if (jp) log.debug('   JSON-LD JobPosting found.');
 
-            // company: prefer on-page meta; if masked/null, try JSON-LD
-            let company = meta.company || null;
-            if (company && /details here/i.test(company)) company = null;
-            if (!company && jp?.hiringOrganization?.name) {
-                company = String(jp.hiringOrganization.name).trim() || null;
-                if (company) log.debug(`   Company filled from JSON-LD: ${company}`);
-            }
+            // --- Company ---
+            const company = extractCompanyName($, meta, jp);
 
-            // job_type vs schedule: NEVER swap.
-            // - job_type only from on-page "Job Type" (Employee / Contract / Freelance).
-            // - schedule from on-page "Job Schedule"; if missing, fallback to JSON-LD employmentType.
+            // --- Job type / schedule ---
             const job_type = meta.job_type ?? null;
             let schedule = meta.schedule ?? null;
-            if (!schedule && jp?.employmentType) {
-                const norm = normalizeEmploymentType(jp.employmentType);
-                if (norm) {
-                    schedule = norm;
-                    log.debug(`   Schedule filled from JSON-LD employmentType: ${schedule}`);
-                }
-            }
+            if (!schedule && jp?.employmentType) schedule = normalizeEmploymentType(jp.employmentType);
 
-            // location: prefer on-page; if missing/empty, fallback to JSON-LD address
+            // --- Location ---
             let location = meta.location ?? null;
-            if (!location && jp) {
-                const ldLoc = locationFromJsonLd(jp);
-                if (ldLoc) {
-                    location = ldLoc;
-                    log.debug(`   Location filled from JSON-LD: ${location}`);
-                }
-            }
+            if (!location && jp) location = locationFromJsonLd(jp);
             if (location) location = location.replace(/\s+/g, ' ').trim();
 
-            // description: prefer JSON-LD description; fallback to DOM cleaner
-            let descHtml = null, descText = null;
-            if (jp?.description) {
-                const cleaned = cleanHtmlFragment(jp.description);
-                descHtml = cleaned.html;
-                descText = cleaned.text;
-                if (descHtml || descText) log.debug('   Description taken from JSON-LD.');
-            }
-            if (!descHtml && !descText) {
-                const d2 = cleanDescriptionFromDom($);
-                descHtml = d2.html;
-                descText = d2.text;
-                if (descHtml || descText) log.debug('   Description taken from DOM fallback.');
-            }
+            // --- Description ---
+            const { html: descHtml, text: descText } = extractDescription($, jp);
 
             const job = {
                 source: 'flexjobs',
@@ -378,16 +421,14 @@ const crawler = new CheerioCrawler({
                 location: location || null,
                 salary: meta.salary ?? null,
                 benefits: meta.benefits ?? null,
-                job_type,                  // <-- stays job_type (Employee/Contract/Freelance)
-                schedule,                  // <-- stays schedule (Full-Time/Part-Time), may come from JSON-LD
+                job_type,
+                schedule,
                 career_level: meta.career_level ?? null,
                 company: company || null,
                 description_html: descHtml || null,
                 description_text: descText || null,
                 scraped_at: new Date().toISOString(),
             };
-
-            log.debug(`   Extracted job: ${JSON.stringify(job, null, 2).slice(0, 600)}...`);
 
             await Actor.pushData(job);
             pushedCount++;
