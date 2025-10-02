@@ -1,4 +1,4 @@
-# FlexJobs Scraper (HTTP + Cheerio)
+# FlexJobs Scraper
 
 This Apify actor scrapes job listings from FlexJobs using HTTP requests and Cheerio for parsing. It is designed to be fast and lightweight, avoiding headless browsers like Playwright or Puppeteer.
 
