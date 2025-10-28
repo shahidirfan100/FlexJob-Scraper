@@ -689,8 +689,12 @@ const crawler = new CheerioCrawler({
             }
             
             // Enqueue job detail pages with referer tracking
+            let enqueuedCount = 0;
             for (const url of jobUrls) {
-                if (!processedUrls.has(url) && pushedCount < results_wanted) {
+                // Check total jobs we might get (already pushed + already enqueued + this one)
+                const totalPotential = pushedCount + processedUrls.size + 1;
+                
+                if (!processedUrls.has(url) && totalPotential <= results_wanted) {
                     // 🎓 Track referer chain
                     refererMap.set(url, request.loadedUrl);
                     
@@ -700,15 +704,23 @@ const crawler = new CheerioCrawler({
                         uniqueKey: url,
                     }]);
                     processedUrls.add(url);
+                    enqueuedCount++;
                     
                     // 🎓 Natural pacing between enqueuing
-                    await sleep(jitter(100, 300));
+                    await sleep(jitter(50, 150));
+                }
+                
+                // Stop if we have enough jobs queued
+                if (processedUrls.size >= results_wanted) {
+                    break;
                 }
             }
             
-            // Find next page
+            log.info(`📤 Enqueued ${enqueuedCount} jobs. Total queued: ${processedUrls.size}, Total scraped: ${pushedCount}`);
+            
+            // Find next page - only paginate if we need more jobs
             const $next = $('a[rel="next"], a.next, .pagination a:contains("Next")').first();
-            if ($next.length && pushedCount < results_wanted) {
+            if ($next.length && processedUrls.size < results_wanted) {
                 const nextHref = $next.attr('href');
                 if (nextHref) {
                     const nextUrl = new URL(nextHref, request.loadedUrl).href;
@@ -758,6 +770,14 @@ const crawler = new CheerioCrawler({
             // 🎓 Pass description to company extraction for fallback
             const company = extractCompany($, meta, jsonLd, descData.text);
             
+            // Log extraction results
+            if (debugMode) {
+                log.debug(`📊 Extraction results for "${title}"`);
+                log.debug(`   Company: ${company || 'NOT FOUND'}`);
+                log.debug(`   Description: ${descData.text ? descData.text.substring(0, 100) + '...' : 'NOT FOUND'}`);
+                log.debug(`   Date Posted: ${jsonLd?.datePosted || 'NOT FOUND'}`);
+            }
+            
             // Build job object
             const job = {
                 source: 'flexjobs',
@@ -773,16 +793,16 @@ const crawler = new CheerioCrawler({
                     jsonLd?.baseSalary?.value || null),
                 benefits: meta.benefits || null,
                 career_level: meta.career_level || null,
-                description: descData.html,
-                text: descData.text,
-                posted_date: jsonLd?.datePosted || null,
+                description_html: descData.html,
+                description_text: descData.text,
+                date_posted: jsonLd?.datePosted || null,
                 valid_through: jsonLd?.validThrough || null,
                 scraped_at: new Date().toISOString(),
             };
             
             // Validate job has minimum required data
-            if (!job.title || (!job.company && !job.text)) {
-                log.warning(`⚠️ Insufficient data for job: ${title}`);
+            if (!job.title) {
+                log.warning(`⚠️ Missing title for job`);
                 if (debugMode) {
                     await Actor.setValue(`insufficient-${Date.now()}.json`, job);
                 }
@@ -827,7 +847,8 @@ const crawler = new CheerioCrawler({
 
 // ---------- Start Crawling ----------
 log.info('🚀 Starting FlexJobs scraper...');
-log.info(`Configuration: ${maxConcurrency} concurrent, ${results_wanted} target`);
+log.info(`📊 Configuration: ${maxConcurrency} concurrent requests, ${results_wanted} jobs target`);
+log.info(`🔗 Starting URLs: ${startUrls.join(', ')}`);
 
 await crawler.run(
     startUrls.map(url => ({
@@ -837,5 +858,7 @@ await crawler.run(
     }))
 );
 
-log.info(`✅ Scraping complete! Scraped ${pushedCount} jobs`);
+log.info(`✅ Scraping complete! Successfully scraped ${pushedCount} jobs`);
+log.info(`📈 Stats: ${processedUrls.size} URLs processed, ${pushedCount} jobs saved`);
+
 await Actor.exit();
