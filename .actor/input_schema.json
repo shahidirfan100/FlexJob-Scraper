@@ -1,13 +1,13 @@
 {
   "title": "FlexJobs Jobs Scraper",
-  "description": "Scrapes job listings from FlexJobs by crawling public category and job pages. Does not require a login and avoids using the keyword search, which is restricted for anonymous users.",
+  "description": "Scrapes job listings from FlexJobs by crawling public category and job pages. Simply provide start URLs and set your preferences.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "startUrls": {
       "title": "Start URLs",
       "type": "array",
-      "description": "List of FlexJobs category or listing URLs to start crawling from. The actor will find more links from these pages.",
+      "description": "List of FlexJobs category or listing URLs to start crawling from. The scraper will automatically find more links.",
       "prefill": [
         "https://www.flexjobs.com/remote-jobs",
         "https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now"
@@ -15,42 +15,10 @@
       "editor": "stringList",
       "sectionCaption": "Start URLs"
     },
-    "keyword": {
-      "title": "Keyword(s)",
-      "type": "string",
-      "description": "NOTE: This field is for compatibility and is NOT used to perform a search, as FlexJobs search is restricted. The scraper starts from broad category pages.",
-      "editor": "textfield",
-      "sectionCaption": "Search Parameters (Not Used)"
-    },
-    "location": {
-      "title": "Location",
-      "type": "string",
-      "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
-      "editor": "textfield"
-    },
-    "posted_date": {
-      "title": "Date Posted",
-      "type": "string",
-      "description": "NOTE: This field is for compatibility and is NOT used to perform a search.",
-      "editor": "select",
-      "default": "anytime",
-      "enum": [
-        "anytime",
-        "24h",
-        "7d",
-        "30d"
-      ],
-      "enumTitles": [
-        "Any Time",
-        "Last 24 Hours",
-        "Last 7 Days",
-        "Last 30 Days"
-      ]
-    },
     "results_wanted": {
       "title": "Maximum Jobs",
       "type": "integer",
-      "description": "The maximum number of jobs to collect. The scraper will stop when this limit is reached.",
+      "description": "The maximum number of jobs to collect. Leave blank for unlimited.",
       "minimum": 1,
       "editor": "number",
       "default": 100,
@@ -59,7 +27,7 @@
     "maxPagesPerList": {
       "title": "Maximum Pages per List",
       "type": "integer",
-      "description": "A safety cap on the number of search result pages to visit per category. The scraper stops paginating a category if it hits this limit.",
+      "description": "Maximum number of pages to visit per category to prevent excessive crawling.",
       "minimum": 1,
       "editor": "number",
       "default": 25
@@ -67,7 +35,7 @@
     "maxConcurrency": {
       "title": "Max Concurrency",
       "type": "integer",
-      "description": "Maximum number of concurrent requests.",
+      "description": "Maximum number of simultaneous requests for faster scraping.",
       "minimum": 1,
       "default": 10,
       "sectionCaption": "Advanced Configuration"
@@ -75,15 +43,15 @@
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Use Apify Proxy (recommended). Consider Residential proxies if you encounter blocking. A proxy is required to avoid being blocked.",
+      "description": "Use Apify Proxy to avoid blocking. Residential proxies recommended if needed.",
       "editor": "proxy"
     },
     "cookies": {
       "title": "Cookies",
       "type": "array",
-      "description": "Optional list of cookies to send with every request. Each cookie should be a JSON object with 'name' and 'value'. Example: [{\"name\": \"sessionid\", \"value\": \"abc123\"}].",
+      "description": "Optional cookies for requests. Format: [{\"name\": \"sessionid\", \"value\": \"abc123\"}].",
       "editor": "json",
-      "sectionCaption": "Authentication (Optional)"
+      "sectionCaption": "Optional Settings"
     }
   },
   "required": [],
