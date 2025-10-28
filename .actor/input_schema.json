@@ -12,20 +12,18 @@
         "https://www.flexjobs.com/remote-jobs",
         "https://www.flexjobs.com/remote-jobs/legitimate-work-from-home-jobs-hiring-now"
       ],
-      "editor": "stringList",
-      "sectionCaption": "Start URLs"
+      "editor": "stringList"
     },
     "results_wanted": {
       "title": "Maximum Jobs",
       "type": "integer",
-      "description": "The maximum number of jobs to collect. Leave blank for unlimited.",
+      "description": "The maximum number of jobs to collect.",
       "minimum": 1,
       "editor": "number",
-      "default": 100,
-      "sectionCaption": "Data Collection"
+      "default": 100
     },
     "maxPagesPerList": {
-      "title": "Maximum Pages per List",
+      "title": "Maximum Pages per Category",
       "type": "integer",
       "description": "Maximum number of pages to visit per category to prevent excessive crawling.",
       "minimum": 1,
@@ -33,25 +31,24 @@
       "default": 25
     },
     "maxConcurrency": {
-      "title": "Max Concurrency",
+      "title": "Concurrency",
       "type": "integer",
-      "description": "Maximum number of simultaneous requests for faster scraping.",
+      "description": "Number of simultaneous requests. Lower values (2-3) are more stealthy, higher values (5-10) are faster.",
       "minimum": 1,
-      "default": 10,
-      "sectionCaption": "Advanced Configuration"
+      "maximum": 20,
+      "default": 2
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Use Apify Proxy to avoid blocking. Residential proxies recommended if needed.",
+      "description": "Use Apify Proxy to avoid blocking. Residential proxies recommended.",
       "editor": "proxy"
     },
     "cookies": {
-      "title": "Cookies",
+      "title": "Cookies (Optional)",
       "type": "array",
-      "description": "Optional cookies for requests. Format: [{\"name\": \"sessionid\", \"value\": \"abc123\"}].",
-      "editor": "json",
-      "sectionCaption": "Optional Settings"
+      "description": "Optional cookies for requests. Format: [{\"name\": \"sessionid\", \"value\": \"abc123\"}]",
+      "editor": "json"
     }
   },
   "required": [],

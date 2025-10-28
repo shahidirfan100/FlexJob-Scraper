@@ -586,17 +586,17 @@ const crawler = new CheerioCrawler({
             maxUsageCount: 8, // 🎓 Rotate sessions more frequently
             maxErrorScore: 2, // 🎓 More strict error tolerance
         },
-        createSessionFunction: (sessionPool) => {
-            const session = sessionPool.constructor.prototype.createSession.call(sessionPool);
-            session.userData.requestCount = 0;
-            session.userData.browserProfile = randFrom(BROWSER_PROFILES);
-            session.userData.startTime = Date.now();
-            return session;
-        },
     },
     
     preNavigationHooks: [
         async ({ request, session }) => {
+            // 🎓 Initialize session userData on first use
+            if (session && !session.userData.browserProfile) {
+                session.userData.requestCount = 0;
+                session.userData.browserProfile = randFrom(BROWSER_PROFILES);
+                session.userData.startTime = Date.now();
+            }
+            
             // 🎓 Network latency simulation (DNS + TCP handshake)
             const networkLatency = jitter(50, 200);
             await sleep(networkLatency);
