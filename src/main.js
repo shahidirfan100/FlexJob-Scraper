@@ -1,5 +1,6 @@
 import { Actor } from 'apify';
 import { CheerioCrawler, log, sleep } from 'crawlee';
+import * as cheerio from 'cheerio';
 
 /**
  * FlexJobs Scraper - Enhanced Stealth Version
@@ -85,10 +86,10 @@ function calculateReadingTime(contentLength) {
     // Average reading speed: 200-250 words per minute
     // Assume ~5 chars per word
     const words = contentLength / 5;
-    const readingTimeMs = (words / 225) * 60 * 1000;
-    // Add random variance ±30%
-    const min = readingTimeMs * 0.7;
-    const max = readingTimeMs * 1.3;
+    const baseDelayMs = Math.min(Math.max((words / 250) * 60 * 1000, 350), 1600);
+    const variance = Math.max(Math.floor(baseDelayMs * 0.25), 120);
+    const min = Math.max(200, baseDelayMs - variance);
+    const max = baseDelayMs + variance;
     return jitter(Math.floor(min), Math.floor(max));
 }
 
@@ -99,7 +100,7 @@ const {
     results_wanted = 100,
     maxConcurrency = 2, // 🎓 Lower concurrency for stealth
     proxyConfiguration,
-    startUrls = ['https://www.flexjobs.com/remote-jobs'],
+    startUrls = ['https://www.flexjobs.com/publicjobs'],
     cookies = [],
     debugMode = false,
 } = input;
@@ -108,6 +109,7 @@ const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 let pushedCount = 0;
 let processedUrls = new Set();
 let refererMap = new Map(); // 🎓 Track referer chains
+const detailQueueLimit = Math.max(results_wanted * 2, results_wanted + 20);
 
 // ---------- Core Extraction Functions ----------
 
@@ -374,19 +376,23 @@ function extractDescription($, jsonLd) {
     // Try JSON-LD first
     if (jsonLd?.description) {
         const text = jsonLd.description.replace(/\s+/g, ' ').trim();
-        if (text.length > 100) {
+        if (text.length > 40) {
             return {
                 text,
                 html: `<p>${text}</p>`,
             };
         }
     }
-    
+
     // CSS selector strategies
     const selectors = [
         // Modern data attributes
         '[data-job-description]',
         '[data-description]',
+        'section[data-test="job-description"]',
+        'section[data-testid*="job-description"]',
+        'div[data-test="job-description"]',
+        'div[data-testid*="job-description"]',
         // Class-based
         '.job-description',
         '.description',
@@ -400,44 +406,49 @@ function extractDescription($, jsonLd) {
         'article .content',
         'main .content',
     ];
-    
+
     for (const selector of selectors) {
         const $el = $(selector).first();
         if (!$el.length) continue;
-        
+
         const $cleaned = cleanDescriptionElement($el.clone(), $);
         const html = $cleaned.html();
         const text = $cleaned.text().replace(/\s+/g, ' ').trim();
-        
-        if (text.length > 100 && !text.toLowerCase().includes('similar jobs')) {
+
+        if (text.length > 40 && !text.toLowerCase().includes('similar jobs')) {
             return { html, text };
         }
     }
-    
+
     // Fallback: Look for heading-based sections
     const $heading = $('h2, h3').filter((_, el) => {
         const text = $(el).text().toLowerCase();
         return /job description|about (the|this) (role|position|job)|overview|responsibilities/i.test(text);
     }).first();
-    
+
     if ($heading.length) {
         const $container = $('<div></div>');
         let $current = $heading.next();
-        
+
         while ($current.length && !$current.is('h1, h2, h3')) {
             $container.append($current.clone());
             $current = $current.next();
         }
-        
+
         const $cleaned = cleanDescriptionElement($container, $);
         const html = $cleaned.html();
         const text = $cleaned.text().replace(/\s+/g, ' ').trim();
-        
-        if (text.length > 100) {
+
+        if (text.length > 40) {
             return { html, text };
         }
     }
-    
+
+    const scriptDescription = extractDescriptionFromInlineScripts($);
+    if (scriptDescription) {
+        return scriptDescription;
+    }
+
     return { html: null, text: null };
 }
 
@@ -458,6 +469,65 @@ function cleanDescriptionElement($el, $) {
     });
     
     return $el;
+}
+
+function extractDescriptionFromInlineScripts($) {
+    const scripts = $('script:not([src])').slice(0, 25);
+    const patterns = [
+        /"descriptionHtml"\s*:\s*"(.+?)"/is,
+        /"jobDescriptionHtml"\s*:\s*"(.+?)"/is,
+        /"jobDescription"\s*:\s*"(.+?)"/is,
+        /"description"\s*:\s*"(.+?)"/is,
+    ];
+
+    for (const script of scripts) {
+        const raw = $(script).html();
+        if (!raw || raw.length < 60) continue;
+        if (!/description/i.test(raw)) continue;
+
+        for (const pattern of patterns) {
+            const match = raw.match(pattern);
+            if (!match) continue;
+
+            const decoded = decodeEmbeddedJsonString(match[1]);
+            if (!decoded) continue;
+
+            const $wrapper = cheerio.load(`<div>${decoded}</div>`);
+            const $container = $wrapper('div').first();
+            const $cleaned = cleanDescriptionElement($container, $wrapper);
+            const html = $cleaned.html();
+            const text = $cleaned.text().replace(/\s+/g, ' ').trim();
+
+            if (text.length > 40) {
+                return { html, text };
+            }
+        }
+    }
+
+    return null;
+}
+
+function decodeEmbeddedJsonString(value) {
+    if (!value) return null;
+
+    let normalized = value
+        .replace(/\\u003c/gi, '<')
+        .replace(/\\u003e/gi, '>')
+        .replace(/\\u0026/gi, '&')
+        .replace(/\\u0027/gi, "'")
+        .replace(/\\u2019/gi, "'")
+        .replace(/\\\//g, '/');
+
+    try {
+        const wrapped = `{"v":"${normalized.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"}`;
+        return JSON.parse(wrapped).v;
+    } catch (error) {
+        return normalized
+            .replace(/\\"/g, '"')
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, ' ')
+            .replace(/\\t/g, ' ');
+    }
 }
 
 /**
@@ -597,13 +667,13 @@ const crawler = new CheerioCrawler({
                 session.userData.startTime = Date.now();
             }
             
-            // 🎓 Network latency simulation (DNS + TCP handshake)
-            const networkLatency = jitter(50, 200);
+            // ?? Network latency simulation (DNS + TCP handshake)
+            const networkLatency = jitter(30, 120);
             await sleep(networkLatency);
-            
-            // 🎓 Human-like delays with variance
+
+            // ?? Human-like delays with variance
             const isDetailPage = request.userData.label === 'DETAIL';
-            const baseDelay = isDetailPage ? jitter(2000, 4500) : jitter(1500, 3000);
+            const baseDelay = isDetailPage ? jitter(450, 1100) : jitter(300, 800);
             await sleep(baseDelay);
             
             // Get browser profile from session
@@ -668,14 +738,14 @@ const crawler = new CheerioCrawler({
         
         // 🎓 Simulate human reading time based on page content
         const pageContentLength = $.html().length;
-        const readingDelay = Math.min(calculateReadingTime(pageContentLength), 5000); // Cap at 5s
+        const readingDelay = Math.min(calculateReadingTime(pageContentLength), 2000); // Cap at 2s
         
         // === HANDLE LISTING PAGES ===
         if (request.userData.label === 'LIST') {
             log.info('📋 Processing listing page...');
             
             // 🎓 Simulate browsing time on listing
-            await sleep(jitter(1000, 2500));
+            await sleep(jitter(250, 650));
             
             // Extract job URLs
             const jobUrls = extractJobUrls($, request.loadedUrl);
@@ -691,27 +761,30 @@ const crawler = new CheerioCrawler({
             // Enqueue job detail pages with referer tracking
             let enqueuedCount = 0;
             for (const url of jobUrls) {
-                // Check total jobs we might get (already pushed + already enqueued + this one)
-                const totalPotential = pushedCount + processedUrls.size + 1;
-                
-                if (!processedUrls.has(url) && totalPotential <= results_wanted) {
-                    // 🎓 Track referer chain
-                    refererMap.set(url, request.loadedUrl);
-                    
-                    await crawler.addRequests([{
-                        url,
-                        userData: { label: 'DETAIL' },
-                        uniqueKey: url,
-                    }]);
-                    processedUrls.add(url);
-                    enqueuedCount++;
-                    
-                    // 🎓 Natural pacing between enqueuing
-                    await sleep(jitter(50, 150));
+                if (processedUrls.has(url)) {
+                    continue;
                 }
-                
+
+                if (processedUrls.size >= detailQueueLimit || pushedCount >= results_wanted) {
+                    break;
+                }
+
+                // ?? Track referer chain
+                refererMap.set(url, request.loadedUrl);
+
+                await crawler.addRequests([{
+                    url,
+                    userData: { label: 'DETAIL' },
+                    uniqueKey: url,
+                }]);
+                processedUrls.add(url);
+                enqueuedCount++;
+
+                // ?? Natural pacing between enqueuing
+                await sleep(jitter(50, 150));
+
                 // Stop if we have enough jobs queued
-                if (processedUrls.size >= results_wanted) {
+                if (processedUrls.size >= detailQueueLimit) {
                     break;
                 }
             }
@@ -720,7 +793,7 @@ const crawler = new CheerioCrawler({
             
             // Find next page - only paginate if we need more jobs
             const $next = $('a[rel="next"], a.next, .pagination a:contains("Next")').first();
-            if ($next.length && processedUrls.size < results_wanted) {
+            if ($next.length && processedUrls.size < detailQueueLimit && pushedCount < results_wanted) {
                 const nextHref = $next.attr('href');
                 if (nextHref) {
                     const nextUrl = new URL(nextHref, request.loadedUrl).href;
@@ -753,11 +826,20 @@ const crawler = new CheerioCrawler({
             await sleep(readingDelay);
             
             // Extract basic info
-            const title = $('h1').first().text().trim();
+            let title = $('h1').first().text().trim();
             if (!title) {
-                log.warning('⚠️ No title found - possibly blocked or wrong page');
-                if (debugMode) {
-                    await Actor.setValue(`no-title-${Date.now()}.html`, $.html());
+                title = $('meta[property="og:title"]').attr('content')?.trim() || jsonLd?.title?.trim() || '';
+            }
+
+            if (!title) {
+                const bodyText = $('body').text().toLowerCase();
+                if (/log in|sign in|become a member|join flexjobs/.test(bodyText)) {
+                    log.warning('?? Detail page requires authentication, skipping.');
+                } else {
+                    log.warning('?? No title found - possibly blocked or wrong page');
+                    if (debugMode) {
+                        await Actor.setValue(`no-title-${Date.now()}.html`, $.html());
+                    }
                 }
                 return;
             }
