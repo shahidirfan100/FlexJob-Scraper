@@ -110,6 +110,23 @@ let pushedCount = 0;
 let processedUrls = new Set();
 let refererMap = new Map(); // 🎓 Track referer chains
 const detailQueueLimit = Math.max(results_wanted * 2, results_wanted + 20);
+const MIN_DESCRIPTION_LENGTH = 40;
+const INLINE_SCRIPT_SCAN_LIMIT = 40;
+
+function normalizeWhitespace(value) {
+    return typeof value === 'string'
+        ? value.replace(/\s+/g, ' ').trim()
+        : '';
+}
+
+function safeJsonParse(raw) {
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch (error) {
+        return null;
+    }
+}
 
 // ---------- Core Extraction Functions ----------
 
@@ -213,6 +230,8 @@ function assignMetaValue(meta, label, value) {
         meta.schedule = value;
     } else if (/career\s*level|experience\s*level|seniority/i.test(label)) {
         meta.career_level = value;
+    } else if (/posted|date\s*posted|posted\s*on|date\s*published/i.test(label)) {
+        meta.date_posted = value;
     } else if (/company|employer|organization|hiring/i.test(label)) {
         meta.company = value;
     }
@@ -249,6 +268,88 @@ function extractJsonLd($) {
         if (data['@graph']) {
             const jobPosting = data['@graph'].find(item => item['@type'] === 'JobPosting');
             if (jobPosting) return jobPosting;
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Attempts to extract job data embedded in inline JSON payloads (Nuxt/React/etc).
+ */
+function extractEmbeddedJobPayload($) {
+    const scripts = $('script[type="application/json"], script:not([src])')
+        .slice(0, INLINE_SCRIPT_SCAN_LIMIT);
+    
+    for (const script of scripts) {
+        let raw = $(script).html();
+        if (!raw) continue;
+        if (raw.length < 80) continue;
+        if (!/job|JobPosting|datePosted|description/i.test(raw)) continue;
+        
+        raw = raw
+            .replace(/^window\.__NUXT__\s*=\s*/, '')
+            .replace(/^window\.__INITIAL_STATE__\s*=\s*/, '')
+            .replace(/^window\.FLEXJOBS\s*=\s*/, '')
+            .replace(/^var\s+\w+\s*=\s*/, '')
+            .trim();
+        
+        const candidate = extractJsonCandidate(raw);
+        const parsed = safeJsonParse(candidate);
+        if (!parsed) continue;
+        
+        const jobNode = findJobDataInObject(parsed);
+        if (jobNode) {
+            return jobNode;
+        }
+    }
+    
+    return null;
+}
+
+function extractJsonCandidate(raw) {
+    if (!raw) return null;
+    if ((raw.startsWith('{') && raw.includes('}')) ||
+        (raw.startsWith('[') && raw.includes(']'))) {
+        return raw.replace(/;$/, '');
+    }
+    const firstBrace = raw.indexOf('{');
+    const lastBrace = raw.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        return raw.slice(firstBrace, lastBrace + 1);
+    }
+    const firstBracket = raw.indexOf('[');
+    const lastBracket = raw.lastIndexOf(']');
+    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+        return raw.slice(firstBracket, lastBracket + 1);
+    }
+    return null;
+}
+
+function findJobDataInObject(node, visited = new Set()) {
+    if (!node) return null;
+    if (typeof node !== 'object') return null;
+    if (visited.has(node)) return null;
+    visited.add(node);
+    
+    const normalized = Array.isArray(node) ? node : [node];
+    for (const item of normalized) {
+        if (!item || typeof item !== 'object') continue;
+        if (
+            item['@type'] === 'JobPosting' ||
+            item.jobPosting ||
+            item.job ||
+            (item.description && item.datePosted)
+        ) {
+            if (item.jobPosting) return item.jobPosting;
+            if (item.job) return item.job;
+            return item;
+        }
+        
+        for (const value of Object.values(item)) {
+            if (typeof value !== 'object') continue;
+            const found = findJobDataInObject(value, visited);
+            if (found) return found;
         }
     }
     
@@ -372,84 +473,94 @@ function extractCompany($, meta, jsonLd, descriptionText) {
 /**
  * CRITICAL FIX #4: Description extraction with better cleaning
  */
-function extractDescription($, jsonLd) {
-    // Try JSON-LD first
-    if (jsonLd?.description) {
-        const text = jsonLd.description.replace(/\s+/g, ' ').trim();
-        if (text.length > 40) {
-            return {
-                text,
-                html: `<p>${text}</p>`,
-            };
+function extractDescription($, jsonLd, embeddedJobData) {
+    let best = null;
+    const registerDescription = (html, text, source) => {
+        const cleanedText = normalizeWhitespace(text || '');
+        const hasHtml = typeof html === 'string' && html.trim().length > 0;
+        if (cleanedText.length < MIN_DESCRIPTION_LENGTH && !hasHtml) return;
+        if (cleanedText.toLowerCase().includes('similar jobs')) return;
+        best = {
+            html: hasHtml ? html : (cleanedText ? `<p>${cleanedText}</p>` : null),
+            text: cleanedText || null,
+            source,
+        };
+    };
+    
+    if (embeddedJobData) {
+        const embeddedHtml = embeddedJobData.descriptionHtml || embeddedJobData.jobDescriptionHtml;
+        if (embeddedHtml) {
+            const $wrapper = cheerio.load(`<div>${embeddedHtml}</div>`);
+            const $cleaned = cleanDescriptionElement($wrapper('div').first(), $wrapper);
+            registerDescription($cleaned.html(), $cleaned.text(), 'embedded-json-html');
+        }
+        
+        const embeddedText = embeddedJobData.description || embeddedJobData.jobDescription;
+        if (embeddedText && !best) {
+            registerDescription(null, embeddedText, 'embedded-json-text');
         }
     }
+    
+    if (!best && jsonLd?.description) {
+        registerDescription(null, jsonLd.description, 'jsonld');
+    }
 
-    // CSS selector strategies
     const selectors = [
-        // Modern data attributes
         '[data-job-description]',
         '[data-description]',
         'section[data-test="job-description"]',
         'section[data-testid*="job-description"]',
         'div[data-test="job-description"]',
         'div[data-testid*="job-description"]',
-        // Class-based
+        '[itemprop="description"]',
         '.job-description',
         '.description',
         '.job-content',
         '.job-detail-content',
         '[class*="description"]',
-        // ID-based
         '#job-description',
         '#description',
-        // Semantic
         'article .content',
         'main .content',
     ];
 
     for (const selector of selectors) {
+        if (best) break;
         const $el = $(selector).first();
         if (!$el.length) continue;
 
         const $cleaned = cleanDescriptionElement($el.clone(), $);
-        const html = $cleaned.html();
-        const text = $cleaned.text().replace(/\s+/g, ' ').trim();
+        registerDescription($cleaned.html(), $cleaned.text(), selector);
+    }
 
-        if (text.length > 40 && !text.toLowerCase().includes('similar jobs')) {
-            return { html, text };
+    if (!best) {
+        const $heading = $('h2, h3').filter((_, el) => {
+            const text = $(el).text().toLowerCase();
+            return /job description|about (the|this) (role|position|job)|overview|responsibilities/i.test(text);
+        }).first();
+
+        if ($heading.length) {
+            const $container = $('<div></div>');
+            let $current = $heading.next();
+
+            while ($current.length && !$current.is('h1, h2, h3')) {
+                $container.append($current.clone());
+                $current = $current.next();
+            }
+
+            const $cleaned = cleanDescriptionElement($container, $);
+            registerDescription($cleaned.html(), $cleaned.text(), 'heading-fallback');
         }
     }
 
-    // Fallback: Look for heading-based sections
-    const $heading = $('h2, h3').filter((_, el) => {
-        const text = $(el).text().toLowerCase();
-        return /job description|about (the|this) (role|position|job)|overview|responsibilities/i.test(text);
-    }).first();
-
-    if ($heading.length) {
-        const $container = $('<div></div>');
-        let $current = $heading.next();
-
-        while ($current.length && !$current.is('h1, h2, h3')) {
-            $container.append($current.clone());
-            $current = $current.next();
-        }
-
-        const $cleaned = cleanDescriptionElement($container, $);
-        const html = $cleaned.html();
-        const text = $cleaned.text().replace(/\s+/g, ' ').trim();
-
-        if (text.length > 40) {
-            return { html, text };
+    if (!best) {
+        const scriptDescription = extractDescriptionFromInlineScripts($);
+        if (scriptDescription) {
+            registerDescription(scriptDescription.html, scriptDescription.text, 'inline-script');
         }
     }
 
-    const scriptDescription = extractDescriptionFromInlineScripts($);
-    if (scriptDescription) {
-        return scriptDescription;
-    }
-
-    return { html: null, text: null };
+    return best || { html: null, text: null, source: 'not-found' };
 }
 
 function cleanDescriptionElement($el, $) {
@@ -472,7 +583,7 @@ function cleanDescriptionElement($el, $) {
 }
 
 function extractDescriptionFromInlineScripts($) {
-    const scripts = $('script:not([src])').slice(0, 25);
+    const scripts = $('script:not([src])').slice(0, INLINE_SCRIPT_SCAN_LIMIT);
     const patterns = [
         /"descriptionHtml"\s*:\s*"(.+?)"/is,
         /"jobDescriptionHtml"\s*:\s*"(.+?)"/is,
@@ -498,7 +609,7 @@ function extractDescriptionFromInlineScripts($) {
             const html = $cleaned.html();
             const text = $cleaned.text().replace(/\s+/g, ' ').trim();
 
-            if (text.length > 40) {
+            if (text.length > MIN_DESCRIPTION_LENGTH) {
                 return { html, text };
             }
         }
@@ -604,6 +715,163 @@ function extractLocation(meta, jsonLd) {
     }
     
     return null;
+}
+
+function extractDatePosted($, meta, jsonLd, embeddedJobData) {
+    const candidates = [];
+    const addCandidate = (value, source) => {
+        if (!value) return;
+        candidates.push({ value, source });
+    };
+    
+    addCandidate(meta.date_posted, 'meta');
+    addCandidate(jsonLd?.datePosted, 'jsonLd');
+    addCandidate(embeddedJobData?.datePosted || embeddedJobData?.postedAt, 'embedded');
+    
+    const attrSelectors = [
+        '[data-date-posted]',
+        '[data-posted-date]',
+        '[data-testid="posted-date"]',
+        'time[datetime]',
+        '.date-posted',
+        '.posted-date',
+        '.job-date',
+        '.posting-date',
+    ];
+    
+    for (const selector of attrSelectors) {
+        const $el = $(selector).first();
+        if (!$el.length) continue;
+        const attr = $el.attr('datetime') || $el.attr('data-date-posted') || $el.attr('data-posted-date');
+        addCandidate(attr || $el.text(), selector);
+    }
+    
+    const inlineScriptDate = extractDateFromInlineScripts($);
+    addCandidate(inlineScriptDate, 'inline-script');
+    
+    for (const candidate of candidates) {
+        const normalized = normalizeDateValue(candidate.value);
+        if (normalized) {
+            return normalized;
+        }
+    }
+    
+    return null;
+}
+
+function normalizeDateValue(value) {
+    if (!value || typeof value !== 'string') return null;
+    let cleaned = value
+        .replace(/posted\s*(on|date)?[:\-]?\s*/i, '')
+        .replace(/Updated\s*:/i, '')
+        .replace(/\bby\b.*$/i, '')
+        .trim();
+    
+    if (!cleaned) return null;
+    
+    const relativeMatch = cleaned.match(/(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago/i);
+    if (relativeMatch) {
+        const amount = parseInt(relativeMatch[1], 10);
+        const unit = relativeMatch[2].toLowerCase();
+        const now = new Date();
+        const date = new Date(now);
+        switch (unit) {
+            case 'minute':
+            case 'minutes':
+                date.setMinutes(now.getMinutes() - amount);
+                break;
+            case 'hour':
+            case 'hours':
+                date.setHours(now.getHours() - amount);
+                break;
+            case 'day':
+            case 'days':
+                date.setDate(now.getDate() - amount);
+                break;
+            case 'week':
+            case 'weeks':
+                date.setDate(now.getDate() - amount * 7);
+                break;
+            case 'month':
+            case 'months':
+                date.setMonth(now.getMonth() - amount);
+                break;
+            case 'year':
+            case 'years':
+                date.setFullYear(now.getFullYear() - amount);
+                break;
+            default:
+                break;
+        }
+        return date.toISOString();
+    }
+    
+    const isoMatch = cleaned.match(/\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)/);
+    if (isoMatch) {
+        const date = new Date(isoMatch[0]);
+        if (!Number.isNaN(date.getTime())) {
+            return date.toISOString();
+        }
+    }
+    
+    cleaned = cleaned.replace(/(\d{1,2})(st|nd|rd|th)/gi, '$1');
+    const parsed = new Date(cleaned);
+    if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toISOString();
+    }
+    
+    const slashMatch = cleaned.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (slashMatch) {
+        const [_, month, day, year] = slashMatch;
+        const fullYear = year.length === 2 ? `20${year}` : year;
+        const date = new Date(`${fullYear}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00Z`);
+        if (!Number.isNaN(date.getTime())) {
+            return date.toISOString();
+        }
+    }
+    
+    return null;
+}
+
+function extractDateFromInlineScripts($) {
+    const scripts = $('script:not([src])').slice(0, INLINE_SCRIPT_SCAN_LIMIT);
+    const patterns = [
+        /"datePosted"\s*:\s*"([^"]+)"/i,
+        /"postedDate"\s*:\s*"([^"]+)"/i,
+        /"postedAt"\s*:\s*"([^"]+)"/i,
+    ];
+    
+    for (const script of scripts) {
+        const raw = $(script).html();
+        if (!raw || raw.length < 40) continue;
+        if (!/dateposted|posteddate|postedat/i.test(raw)) continue;
+        
+        for (const pattern of patterns) {
+            const match = raw.match(pattern);
+            if (match && match[1]) {
+                return decodeEmbeddedJsonString(match[1]);
+            }
+        }
+    }
+    
+    return null;
+}
+
+function validateJob(job, { debugMode, url }) {
+    const missing = [];
+    if (!job.description_text) missing.push('description_text');
+    if (!job.description_html) missing.push('description_html');
+    if (!job.date_posted) missing.push('date_posted');
+    
+    if (missing.length && debugMode) {
+        Actor.setValue(`missing-fields-${Date.now()}.json`, {
+            url,
+            missing,
+            job,
+        }).catch(() => {});
+    }
+    
+    return missing;
 }
 
 /**
@@ -816,19 +1084,26 @@ const crawler = new CheerioCrawler({
         // === HANDLE JOB DETAIL PAGES ===
         if (request.userData.label === 'DETAIL') {
             if (pushedCount >= results_wanted) {
-                log.info(`✋ Reached target: ${pushedCount}/${results_wanted}`);
+                log.info(`? Reached target: ${pushedCount}/${results_wanted}`);
                 return;
             }
             
-            log.info('🔍 Extracting job details...');
+            log.info('?? Extracting job details...');
             
-            // 🎓 Simulate reading time before extraction
             await sleep(readingDelay);
             
-            // Extract basic info
+            const jsonLd = extractJsonLd($);
+            const embeddedJobData = extractEmbeddedJobPayload($);
+            const meta = extractJobMeta($);
+            const descData = extractDescription($, jsonLd, embeddedJobData);
+            
             let title = $('h1').first().text().trim();
             if (!title) {
-                title = $('meta[property="og:title"]').attr('content')?.trim() || jsonLd?.title?.trim() || '';
+                title = $('meta[property="og:title"]').attr('content')?.trim() ||
+                    jsonLd?.title?.trim() ||
+                    embeddedJobData?.title ||
+                    embeddedJobData?.jobTitle ||
+                    '';
             }
 
             if (!title) {
@@ -844,23 +1119,16 @@ const crawler = new CheerioCrawler({
                 return;
             }
             
-            // Extract structured data
-            const jsonLd = extractJsonLd($);
-            const meta = extractJobMeta($);
-            const descData = extractDescription($, jsonLd);
+            const company = extractCompany($, meta, jsonLd, descData.text || embeddedJobData?.companyName);
+            const datePosted = extractDatePosted($, meta, jsonLd, embeddedJobData);
             
-            // 🎓 Pass description to company extraction for fallback
-            const company = extractCompany($, meta, jsonLd, descData.text);
-            
-            // Log extraction results
             if (debugMode) {
-                log.debug(`📊 Extraction results for "${title}"`);
+                log.debug(`?? Extraction results for "${title}"`);
                 log.debug(`   Company: ${company || 'NOT FOUND'}`);
-                log.debug(`   Description: ${descData.text ? descData.text.substring(0, 100) + '...' : 'NOT FOUND'}`);
-                log.debug(`   Date Posted: ${jsonLd?.datePosted || 'NOT FOUND'}`);
+                log.debug(`   Description source: ${descData.source}`);
+                log.debug(`   Date Posted: ${datePosted || jsonLd?.datePosted || 'NOT FOUND'}`);
             }
             
-            // Build job object
             const job = {
                 source: 'flexjobs',
                 url: request.loadedUrl,
@@ -873,30 +1141,34 @@ const crawler = new CheerioCrawler({
                     String(jsonLd.employmentType).replace(/_/g, '-') : null),
                 salary: meta.salary || (jsonLd?.baseSalary?.value?.value || 
                     jsonLd?.baseSalary?.value || null),
-                benefits: meta.benefits || null,
+                benefits: meta.benefits || embeddedJobData?.benefits || null,
                 career_level: meta.career_level || null,
                 description_html: descData.html,
                 description_text: descData.text,
-                date_posted: jsonLd?.datePosted || null,
-                valid_through: jsonLd?.validThrough || null,
+                description_source: descData.source,
+                date_posted: datePosted,
+                valid_through: jsonLd?.validThrough || embeddedJobData?.validThrough || null,
                 scraped_at: new Date().toISOString(),
             };
             
-            // Validate job has minimum required data
             if (!job.title) {
-                log.warning(`⚠️ Missing title for job`);
+                log.warning('?? Missing title for job');
                 if (debugMode) {
                     await Actor.setValue(`insufficient-${Date.now()}.json`, job);
                 }
                 return;
             }
             
-            log.info(`✅ [${pushedCount + 1}/${results_wanted}] ${job.title} @ ${job.company || 'Unknown'}`);
+            const missingFields = validateJob(job, { debugMode, url: request.loadedUrl });
+            if (missingFields.length) {
+                log.warning(`?? Missing critical fields for ${job.title}: ${missingFields.join(', ')}`);
+            }
+            
+            log.info(`? [${pushedCount + 1}/${results_wanted}] ${job.title} @ ${job.company || 'Unknown'}`);
             
             await Actor.pushData(job);
             pushedCount++;
             
-            // 🎓 Mark session as good on success
             if (session) {
                 session.markGood();
             }
